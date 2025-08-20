@@ -364,7 +364,7 @@ namespace TqkLibrary.Queues.TaskQueues
         /// </summary>
         public void ShutDown(int maxRun = 0)
         {
-            MaxRun = maxRun;
+            MaxRun = 0;
             lock (_lock_queues)
             {
                 foreach (var queue in _Queues) queue.TaskDispose();
@@ -374,6 +374,7 @@ namespace TqkLibrary.Queues.TaskQueues
             {
                 foreach (var running in _Runnings) running.TaskCancel();
             }
+            MaxRun = maxRun;
         }
 
         /// <summary>
