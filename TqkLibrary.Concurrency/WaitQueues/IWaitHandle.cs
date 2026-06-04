@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace TqkLibrary.Queues.WaitQueues
+namespace TqkLibrary.Concurrency.WaitQueues
 {
     /// <summary>
     /// 

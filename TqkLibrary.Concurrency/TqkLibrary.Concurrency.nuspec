@@ -6,8 +6,8 @@
 		<version>$version$</version>
 		<description>my private lib</description>
 		<authors>tqk2811</authors>
-		<projectUrl>https://github.com/tqk2811/TqkLibrary.Queues</projectUrl>
-		<repository type="git" url="https://github.com/tqk2811/TqkLibrary.Queues.git"/>
+		<projectUrl>https://github.com/tqk2811/TqkLibrary.Concurrency</projectUrl>
+		<repository type="git" url="https://github.com/tqk2811/TqkLibrary.Concurrency.git"/>
 		<license type="expression">MIT</license>
 		<dependencies>
 			<group targetFramework="net462">

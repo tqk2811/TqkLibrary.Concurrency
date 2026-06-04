@@ -6,7 +6,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace TqkLibrary.Queues.WaitQueues
+namespace TqkLibrary.Concurrency.WaitQueues
 {
     /// <summary>
     /// 

@@ -9,7 +9,7 @@ using System.Linq.Expressions;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace TqkLibrary.Queues.TaskQueues
+namespace TqkLibrary.Concurrency.TaskQueues
 {
 
     /// <summary>

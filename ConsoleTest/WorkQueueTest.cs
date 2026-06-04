@@ -4,8 +4,8 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using TqkLibrary.Queues.TaskQueues;
-using TqkLibrary.Queues.WaitQueues;
+using TqkLibrary.Concurrency.TaskQueues;
+using TqkLibrary.Concurrency.WaitQueues;
 
 namespace ConsoleTest
 {

@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Threading.Tasks;
 
-namespace TqkLibrary.Queues.TaskQueues
+namespace TqkLibrary.Concurrency.TaskQueues
 {
     /// <summary>
     /// 

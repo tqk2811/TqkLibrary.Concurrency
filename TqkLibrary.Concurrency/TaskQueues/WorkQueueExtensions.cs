@@ -1,6 +1,6 @@
 ﻿using System.Threading.Tasks;
 
-namespace TqkLibrary.Queues.TaskQueues
+namespace TqkLibrary.Concurrency.TaskQueues
 {
     internal static class WorkQueueExtensions
     {

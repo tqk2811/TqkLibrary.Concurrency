@@ -14,8 +14,8 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-	  <ProjectReference Include="..\TqkLibrary.Queues\TqkLibrary.Queues.csproj" />
+	  <ProjectReference Include="..\TqkLibrary.Concurrency\TqkLibrary.Concurrency.csproj" />
 	</ItemGroup>
-	
-	
+
+
 </Project>

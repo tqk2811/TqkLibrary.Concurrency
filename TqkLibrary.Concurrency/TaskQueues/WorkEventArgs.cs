@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace TqkLibrary.Queues.TaskQueues
+namespace TqkLibrary.Concurrency.TaskQueues
 {
     /// <summary>
     /// 
