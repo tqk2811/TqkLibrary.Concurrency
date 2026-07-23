@@ -1,11 +1,7 @@
-﻿using Nito.AsyncEx;
+using Nito.AsyncEx;
 using System;
-using System.Collections;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Linq;
-using System.Linq.Expressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -13,7 +9,7 @@ namespace TqkLibrary.Concurrency.TaskQueues
 {
 
     /// <summary>
-    /// 
+    ///
     /// </summary>
     /// <typeparam name="T"></typeparam>
     /// <param name="task"></param>
@@ -21,19 +17,19 @@ namespace TqkLibrary.Concurrency.TaskQueues
 
     public delegate Task WorkComplete<T>(Task task, WorkEventArgs<T> workEventArgs) where T : IWork;
     /// <summary>
-    /// 
+    ///
     /// </summary>
 
     public delegate void RunComplete();
 
 
     /// <summary>
-    /// 
+    ///
     /// </summary>
     public class WorkQueue
     {
         /// <summary>
-        /// 
+        ///
         /// </summary>
         protected readonly Random _random
 #if NET6_0_OR_GREATER
@@ -42,9 +38,11 @@ namespace TqkLibrary.Concurrency.TaskQueues
             = new Random(DateTime.Now.GetHashCode());
 #endif
         /// <summary>
-        /// 
+        ///
         /// </summary>
+#pragma warning disable CS0067//virtual event, only raised by derived WorkQueue<T> override
         public virtual event RunComplete? OnRunComplete;
+#pragma warning restore CS0067
 
         /// <summary>
         /// Non FIFO run
@@ -52,214 +50,276 @@ namespace TqkLibrary.Concurrency.TaskQueues
         public bool RunRandom { get; set; } = false;
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         public TaskScheduler TaskScheduler { get; set; } = TaskScheduler.Default;
 
         /// <summary>
-        /// if true use <see cref="AsyncContext"/> (single thread for asynchronous), default true
+        /// if true use <see cref="AsyncContext"/> (single thread for asynchronous), default true<br/>
+        /// Warning: each running work will hold one dedicated thread (<see cref="TaskCreationOptions.LongRunning"/>)
+        /// for its whole lifetime, even while awaiting. High <c>MaxRun</c> means many threads.
         /// </summary>
         public bool UseAsyncContext { get; set; } = true;
     }
 
     /// <summary>
-    /// 
+    ///
     /// </summary>
     /// <typeparam name="T"></typeparam>
     public class WorkQueue<T> : WorkQueue
         where T : IWork
     {
+        /// <summary>
+        /// Single lock protects <see cref="_Queues"/>, <see cref="_QueueSet"/> and <see cref="_Runnings"/>,
+        /// so every state transition (queue -> running -> removed) and every count check is atomic.
+        /// </summary>
+        private readonly object _lock = new object();
         private readonly List<T> _Queues = new List<T>();
-        private readonly object _lock_queues = new object();
-
+        private readonly HashSet<T> _QueueSet = new HashSet<T>();//O(1) duplicate check for Add/AddRange
         private readonly List<T> _Runnings = new List<T>();
-        private readonly object _lock_runnings = new object();
-
 
         /// <summary>
-        /// 
+        /// true after <see cref="OnRunComplete"/> was fired for the current busy -> idle transition,
+        /// reset to false when new work is added. Prevents duplicated/spurious fires.
+        /// </summary>
+        private bool _isCompleteNotified = true;
+
+        /// <summary>
+        ///
         /// </summary>
         public override event RunComplete? OnRunComplete;
         /// <summary>
-        /// 
+        ///
         /// </summary>
         public event WorkComplete<T>? OnWorkComplete;
+        /// <summary>
+        /// Raised when an internal callback throws (<see cref="OnWorkComplete"/> handler, <see cref="OnRunComplete"/> handler,
+        /// <see cref="IDisposable.Dispose"/> of a work, or the <c>SetRunLockObject</c> callback).
+        /// Without this the exception would be swallowed (or crash the process in older versions).
+        /// </summary>
+        public event Action<Exception>? OnException;
 
         private int _MaxRun = 0;
         /// <summary>
-        /// 
+        ///
         /// </summary>
         public int MaxRun
         {
             get { return _MaxRun; }
             set
             {
-                bool flag = value > _MaxRun;
+                bool increased = value > _MaxRun;
                 _MaxRun = value;
-                if (flag && _Queues.Count != 0)
-                    RunNewWorkAsync();
+                if (increased) RunNewWorkAsync();
             }
         }
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
-        public bool IsRunning { get { return RunningCount != 0 || QueueCount != 0; } }
+        public bool IsRunning { get { lock (_lock) return _Runnings.Count != 0 || _Queues.Count != 0; } }
 
         /// <summary>
-        /// 
+        /// Snapshot of current queued works
         /// </summary>
-        public IReadOnlyList<T> Queues { get { return _Queues; } }
+        public IReadOnlyList<T> Queues { get { lock (_lock) return _Queues.ToArray(); } }
 
         /// <summary>
-        /// 
+        /// Snapshot of current running works
         /// </summary>
-        public IReadOnlyList<T> Runnings { get { return _Runnings; } }
+        public IReadOnlyList<T> Runnings { get { lock (_lock) return _Runnings.ToArray(); } }
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         public int RunningCount
         {
-            get { return _Runnings.Count; }
+            get { lock (_lock) return _Runnings.Count; }
         }
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         public int QueueCount
         {
-            get { return _Queues.Count; }
+            get { lock (_lock) return _Queues.Count; }
         }
 
 
-
-        //need lock Queues first
-        private bool StartQueue(T? queue)
-        {
-            //bool lockTaken = false;
-            //Monitor.Enter(_lock_queues, ref lockTaken);
-            //if(!lockTaken)
-            //{
-            //    Monitor.Exit(_lock_queues);
-            //    return false;
-            //}
-            if (queue is not null)
-            {
-                if (CheckIsLockObject(queue)) return false;
-
-                _Queues.Remove(queue);
-                lock (_lock_runnings) _Runnings.Add(queue);
-
-                if (UseAsyncContext)
-                {
-                    Task.Factory.StartNew(
-                        () => AsyncContext.Run(async () => await queue.DoWorkAsync().ContinueWith(this.ContinueTaskResult, queue, TaskContinuationOptions.ExecuteSynchronously)),
-                        CancellationToken.None,
-                        TaskCreationOptions.LongRunning,
-                        this.TaskScheduler);
-                    return true;
-                }
-                else
-                {
-                    Task.Factory.StartNew(
-                        () => queue.DoWorkAsync(),
-                        CancellationToken.None,
-                        TaskCreationOptions.None,
-                        this.TaskScheduler)
-                    .Unwrap()
-                    .ContinueWith(this.ContinueTaskResult, queue, TaskContinuationOptions.RunContinuationsAsynchronously);
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// Lock <see cref="_Runnings"/>
-        /// </summary>
-        /// <param name="item"></param>
-        /// <returns></returns>
-        bool CheckIsLockObject(T item)
-        {
-            var obj_lock = _RunLockObject.Invoke(item);
-            if (obj_lock != null)
-            {
-                lock (_lock_runnings)
-                {
-                    return _Runnings.Any(x => obj_lock.Equals(_RunLockObject.Invoke(x)));
-                }
-            }
-            return false;
-        }
         private Task RunNewWorkAsync() => Task.Run(RunNewWork);
         private void RunNewWork()
         {
-            int skip = 0;
-            lock (_lock_queues)//Prioritize
+            List<T> toStart = new List<T>();
+            bool isCompleted = false;
+            try
             {
-                var Prioritizes = _Queues.Where(x => x.IsPrioritize).ToList();
-                foreach (var q in Prioritizes) StartQueue(q);
-            }
-
-            if (_Queues.Count == 0 && _Runnings.Count == 0)
-            {
-                OnRunComplete?.Invoke();//on completed
-                return;
-            }
-
-            if (_Runnings.Count >= MaxRun) return;//other
-            else
-            {
-                lock (_lock_queues)
+                lock (_lock)
                 {
-                    T? queue = default(T);
-                    if (RunRandom) queue = _Queues.Count == 0 ? default(T) : _Queues.Skip(_random.Next(_Queues.Count)).FirstOrDefault();
-                    else queue = _Queues.FirstOrDefault();
-                    if (!StartQueue(queue)) skip++;
+                    //Prioritize: start immediately when added, NOT limited by MaxRun (by design)
+                    foreach (var work in _Queues.Where(x => x.IsPrioritize).ToList())
+                    {
+                        if (IsLockObjectBusy(work)) continue;
+                        MoveToRunning(work, toStart);
+                    }
+
+                    //Normal: fill free slots up to MaxRun, skip items blocked by RunLockObject
+                    //instead of stopping at the first blocked one (no head-of-line blocking, no busy-loop)
+                    while (_Runnings.Count < _MaxRun)
+                    {
+                        if (!TryFindEligible(out T work)) break;
+                        MoveToRunning(work, toStart);
+                    }
+
+                    if (_Queues.Count == 0 && _Runnings.Count == 0 && !_isCompleteNotified)
+                    {
+                        _isCompleteNotified = true;
+                        isCompleted = true;
+                    }
                 }
-                if (_Queues.Count > 0 && (_Runnings.Count + skip) < MaxRun) RunNewWorkAsync();
+            }
+            catch (Exception ex)
+            {
+                OnException?.Invoke(ex);
+            }
+            finally
+            {
+                foreach (var work in toStart) StartWork(work);
+                if (isCompleted)
+                {
+                    try { OnRunComplete?.Invoke(); }
+                    catch (Exception ex) { OnException?.Invoke(ex); }
+                }
             }
         }
 
-        private void ContinueTaskResult(Task result, object? work_obj) => WorkCompleted(result, (T)work_obj!);
-
-        private async void WorkCompleted(Task result, T work)
+        //must be called inside lock (_lock)
+        private void MoveToRunning(T work, List<T> toStart)
         {
-            var queueEventArg = new WorkEventArgs<T>(work);
+            _Queues.Remove(work);
+            _QueueSet.Remove(work);
+            _Runnings.Add(work);
+            toStart.Add(work);
+        }
 
-            Task? task = OnWorkComplete?.Invoke(result, queueEventArg);
-            if (task is not null) await task;
+        //must be called inside lock (_lock)
+        private bool TryFindEligible(out T work)
+        {
+            IEnumerable<T> candidates = RunRandom ? _Queues.OrderBy(x => _random.Next()) : _Queues;
+            foreach (var item in candidates)
+            {
+                if (!IsLockObjectBusy(item))
+                {
+                    work = item;
+                    return true;
+                }
+            }
+            work = default!;
+            return false;
+        }
 
-            if (queueEventArg.ShouldDispose) work.Dispose();
+        //must be called inside lock (_lock)
+        private bool IsLockObjectBusy(T item)
+        {
+            var obj_lock = _RunLockObject.Invoke(item);
+            if (obj_lock is null) return false;
+            return _Runnings.Any(x => obj_lock.Equals(_RunLockObject.Invoke(x)));
+        }
 
-            lock (_lock_runnings) _Runnings.Remove(work);
+        private void StartWork(T work)
+        {
+            if (UseAsyncContext)
+            {
+                Task.Factory.StartNew(
+                    () => AsyncContext.Run(() => RunWorkAsync(work)),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    this.TaskScheduler);
+            }
+            else
+            {
+                Task.Factory.StartNew(
+                    () => RunWorkAsync(work),
+                    CancellationToken.None,
+                    TaskCreationOptions.None,
+                    this.TaskScheduler);
+            }
+        }
 
-            _ = RunNewWorkAsync();//much run on threadpool
+        private async Task RunWorkAsync(T work)
+        {
+            Task task = Task.CompletedTask;
+            try
+            {
+                task = work.DoWorkAsync();
+                await task;
+            }
+            catch (Exception ex)
+            {
+                //DoWorkAsync threw synchronously (task never assigned) -> wrap into a faulted task
+                if (task is null || (!task.IsFaulted && !task.IsCanceled)) task = Task.FromException(ex);
+            }
+            await WorkCompleted(task, work);
         }
 
         /// <summary>
-        /// 
+        /// Never throws: handler/dispose exceptions go to <see cref="OnException"/>,
+        /// and the finally block guarantees the work is removed from <see cref="_Runnings"/>
+        /// so the queue can not get stuck.
+        /// </summary>
+        private async Task WorkCompleted(Task result, T work)
+        {
+            _ = result.Exception;//mark observed, avoid UnobservedTaskException
+
+            var queueEventArg = new WorkEventArgs<T>(work);
+            try
+            {
+                var handlers = OnWorkComplete;
+                if (handlers is not null)
+                {
+                    //await every subscriber, not only the last one of the multicast delegate
+                    foreach (WorkComplete<T> handler in handlers.GetInvocationList())
+                    {
+                        Task? task = handler.Invoke(result, queueEventArg);
+                        if (task is not null) await task;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                OnException?.Invoke(ex);
+            }
+            finally
+            {
+                if (queueEventArg.ShouldDispose)
+                {
+                    try { work.Dispose(); }
+                    catch (Exception ex) { OnException?.Invoke(ex); }
+                }
+                lock (_lock) _Runnings.Remove(work);
+                _ = RunNewWorkAsync();//much run on threadpool
+            }
+        }
+
+        /// <summary>
+        ///
         /// </summary>
         /// <param name="work"></param>
         /// <exception cref="ArgumentNullException"></exception>
         public bool Add(T work)
         {
             if (work is null) throw new ArgumentNullException(nameof(work));
-            lock (_lock_queues)
+            lock (_lock)
             {
-                if (!_Queues.Contains(work))
-                {
-                    _Queues.Add(work);
-                    RunNewWorkAsync();
-                    return true;
-                }
-                return false;
+                if (!_QueueSet.Add(work)) return false;
+                _Queues.Add(work);
+                _isCompleteNotified = false;
             }
+            RunNewWorkAsync();
+            return true;
         }
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <returns>Items was not add</returns>
         /// <param name="works"></param>
@@ -269,11 +329,11 @@ namespace TqkLibrary.Concurrency.TaskQueues
             if (null == works) throw new ArgumentNullException(nameof(works));
             int addCount = 0;
             List<T> result = new List<T>();
-            lock (_lock_queues)
+            lock (_lock)
             {
                 foreach (var work in works)
                 {
-                    if (!_Queues.Contains(work))
+                    if (_QueueSet.Add(work))
                     {
                         _Queues.Add(work);
                         addCount++;
@@ -283,39 +343,50 @@ namespace TqkLibrary.Concurrency.TaskQueues
                         result.Add(work);
                     }
                 }
+                if (addCount > 0) _isCompleteNotified = false;
             }
             if (addCount > 0) RunNewWorkAsync();
             return result;
         }
 
         /// <summary>
-        /// 
+        /// If the work is still queued: remove and dispose it (queue owns the work).<br/>
+        /// If the work is running: request cancel (it will be disposed on completion by <see cref="OnWorkComplete"/> flow).
         /// </summary>
         /// <param name="work"></param>
         /// <exception cref="ArgumentNullException"></exception>
         public bool Cancel(T work)
         {
-            if (null == work) throw new ArgumentNullException(nameof(work));
-            lock (_lock_queues)
+            if (work is null) throw new ArgumentNullException(nameof(work));
+            bool removed = false;
+            try
             {
-                if (_Queues.Remove(work))
+                lock (_lock)
                 {
-                    return true;
+                    if (_Queues.Remove(work))
+                    {
+                        _QueueSet.Remove(work);
+                        work.TaskDispose();
+                        removed = true;
+                        return true;
+                    }
+                    if (_Runnings.Contains(work))
+                    {
+                        work.TaskCancel();
+                        return true;
+                    }
                 }
+                return false;
             }
-            lock (_lock_runnings)
+            finally
             {
-                if (_Runnings.Contains(work))
-                {
-                    work.TaskCancel();
-                    return true;
-                }
+                //queue may become empty -> let waiter of WaitForShutDownAsync wake up
+                if (removed) RunNewWorkAsync();
             }
-            return false;
         }
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <param name="func"></param>
         /// <exception cref="ArgumentNullException"></exception>
@@ -324,22 +395,21 @@ namespace TqkLibrary.Concurrency.TaskQueues
         {
             if (null == func) throw new ArgumentNullException(nameof(func));
             List<T> removes = new List<T>();
-            lock (_lock_queues)
+            lock (_lock)
             {
                 foreach (var q in _Queues.Where(func))
                 {
                     q.TaskDispose();
                     removes.Add(q);
                 }
-                removes.ForEach(x => _Queues.Remove(x));
-            }
-            lock (_lock_runnings)
-            {
+                removes.ForEach(x => { _Queues.Remove(x); _QueueSet.Remove(x); });
                 foreach (var q in _Runnings.Where(func))
                 {
                     q.TaskCancel();
                 }
             }
+            //queue may become empty -> let waiter of WaitForShutDownAsync wake up
+            if (removes.Count > 0) RunNewWorkAsync();
             return removes;
         }
 
@@ -360,55 +430,53 @@ namespace TqkLibrary.Concurrency.TaskQueues
         }
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         public void ShutDown(int maxRun = 0)
         {
-            MaxRun = 0;
-            lock (_lock_queues)
+            _MaxRun = 0;
+            lock (_lock)
             {
                 foreach (var queue in _Queues) queue.TaskDispose();
                 _Queues.Clear();
-            }
-            lock (_lock_runnings)
-            {
+                _QueueSet.Clear();
                 foreach (var running in _Runnings) running.TaskCancel();
             }
-            MaxRun = maxRun;
+            _MaxRun = maxRun;
+            //queue may become empty -> let waiter of WaitForShutDownAsync wake up
+            RunNewWorkAsync();
         }
 
         /// <summary>
-        /// 
+        /// Note: blocking (sync over async), prefer <see cref="WaitForShutDownAsync"/>
         /// </summary>
         /// <param name="timeOut"></param>
         public bool WaitForShutDown(int timeOut = -1)
             => WaitForShutDownAsync(timeOut).ConfigureAwait(false).GetAwaiter().GetResult();
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <param name="timeOut"></param>
         /// <returns></returns>
         public async Task<bool> WaitForShutDownAsync(int timeOut = -1)
         {
-            if (RunningCount > 0)
+            TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            RunComplete runComplete = () => taskCompletionSource.TrySetResult(true);
+            //subscribe BEFORE checking state, so the complete event can not slip between check and subscribe
+            this.OnRunComplete += runComplete;
+            try
             {
-                TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!IsRunning) return true;
                 using CancellationTokenSource cancellationTokenSource = new CancellationTokenSource(timeOut);
                 using var register = cancellationTokenSource.Token.Register(() => taskCompletionSource.TrySetResult(false));
-                RunComplete runComplete = () => taskCompletionSource.TrySetResult(true);
-                try
-                {
-                    this.OnRunComplete += runComplete;
-                    await taskCompletionSource.Task.ConfigureAwait(false);
-                }
-                finally
-                {
-                    this.OnRunComplete -= runComplete;
-                }
-                return RunningCount == 0;
+                await taskCompletionSource.Task.ConfigureAwait(false);
+                return !IsRunning;
             }
-            else return true;
+            finally
+            {
+                this.OnRunComplete -= runComplete;
+            }
         }
 
     }

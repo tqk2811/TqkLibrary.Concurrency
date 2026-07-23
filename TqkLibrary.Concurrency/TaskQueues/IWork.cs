@@ -9,7 +9,8 @@ namespace TqkLibrary.Concurrency.TaskQueues
     public interface IWork : IDisposable
     {
         /// <summary>
-        /// Prioritize
+        /// Prioritize: start immediately when added to the queue,
+        /// NOT limited by <c>WorkQueue&lt;T&gt;.MaxRun</c> (by design)
         /// </summary>
         bool IsPrioritize { get; }
 
