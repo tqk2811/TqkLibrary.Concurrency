@@ -1,8 +1,5 @@
 ﻿using Nito.AsyncEx;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -52,7 +49,7 @@ namespace TqkLibrary.Concurrency.WaitQueues
         {
             using (var l = await asyncLock.LockAsync(cancellationToken).ConfigureAwait(false))
             {
-                while (_currentAccess >= _MaxAccess)
+                while (Volatile.Read(ref _currentAccess) >= _MaxAccess)
                 {
                     TaskCompletionSource<bool> tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                     using var register = cancellationToken.Register(() => tcs.TrySetCanceled());
@@ -60,7 +57,7 @@ namespace TqkLibrary.Concurrency.WaitQueues
                     try
                     {
                         AccessChanged += action;
-                        if (_currentAccess >= _MaxAccess)
+                        if (Volatile.Read(ref _currentAccess) >= _MaxAccess)
                         {
                             await tcs.Task.ConfigureAwait(false);
                         }
@@ -82,6 +79,7 @@ namespace TqkLibrary.Concurrency.WaitQueues
         class WaitHandle : IWaitHandle
         {
             readonly WaitQueue waitQueue;
+            int _isDisposed = 0;
             public WaitHandle(WaitQueue waitQueue)
             {
                 this.waitQueue = waitQueue ?? throw new ArgumentNullException(nameof(waitQueue));
@@ -89,7 +87,10 @@ namespace TqkLibrary.Concurrency.WaitQueues
             }
             public void Dispose()
             {
-                waitQueue._Decrement();
+                //guard double-dispose: otherwise _currentAccess is decremented twice
+                //and more callers than MaxAccess can enter
+                if (Interlocked.Exchange(ref _isDisposed, 1) == 0)
+                    waitQueue._Decrement();
             }
         }
     }
